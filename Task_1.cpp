@@ -95,5 +95,9 @@ int main() {
     delete nestLoop_join4_2;
     delete nestLoop_result;
 
+    delete hash_join1_3;
+    delete hash_join4_2;
+    delete hash_result;
+
     return 0;
 }
