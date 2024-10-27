@@ -3,6 +3,7 @@
 #include <set>
 #include <unordered_map>
 #include <float.h>
+#include <iomanip>
 
 using cardinalities_map = std::unordered_map<unsigned long long, std::unordered_map<char, unsigned long long>>; // table_id -> (attr_id -> card)
 using rows_num_map = std::unordered_map<unsigned long long, double>; // table_id -> rows_num
@@ -29,7 +30,11 @@ class Optimizer {
                     }
                     cost *= 2;
                 }
-                this->nodes.insert(std::make_pair(node_max_current_id++, new Node(rows_num[i], cost, view)));
+                this->nodes.insert(std::make_pair(node_max_current_id, new Node));
+                this->nodes[node_max_current_id]->rows = rows_num[i];
+                this->nodes[node_max_current_id]->cost = cost;
+                this->nodes[node_max_current_id]->view = view;
+                node_max_current_id++;
             }
             
             this->rows_num = std::move(rows_num);
@@ -279,7 +284,10 @@ class Optimizer {
             std::string view = std::string("(") + left_subtree->view + std::string(" ") + \
                                right_subtree->view + clauses + std::string(")");
 
-            Node* node = new Node(rows, cost, view);
+            Node* node = new Node;
+            node->rows = rows;
+            node->cost = cost;
+            node->view = view;
             return node;
         }
 
@@ -299,7 +307,10 @@ class Optimizer {
             std::string view = std::string("(") + left_subtree->view + std::string(" ") + \
                                right_subtree->view + clauses + std::string(")");
 
-            Node* node = new Node(rows, cost, view);
+            Node* node = new Node;
+            node->rows = rows;
+            node->cost = cost;
+            node->view = view;
             return node;
         }
 
@@ -309,7 +320,10 @@ class Optimizer {
 
             std::string view = std::string("(") + left_subtree->view + std::string(" ") + right_subtree->view + std::string(")");
 
-            Node* node = new Node(rows, cost, view);
+            Node* node = new Node;
+            node->rows = rows;
+            node->cost = cost;
+            node->view = view;
             return node;
         }
 };
