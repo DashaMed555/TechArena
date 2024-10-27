@@ -2,6 +2,7 @@
 #include <fstream>
 #include <set>
 #include <unordered_map>
+#include <float.h>
 
 using cardinalities_map = std::unordered_map<unsigned long long, std::unordered_map<char, unsigned long long>>; // table_id -> (attr_id -> card)
 using rows_num_map = std::unordered_map<unsigned long long, double>; // table_id -> rows_num
@@ -9,20 +10,26 @@ using join = std::pair<std::pair<unsigned long long, unsigned long long>, std::p
 
 class Optimizer {
     public:
-        Optimizer(unsigned long long tables_num, rows_num_map rows_num, unsigned long long attributes_num, cardinalities_map& attributes_cardinality, \
-                  std::unordered_map<unsigned long long, std::set<char>>& attributes_in_predicates, std::set<join>& joins) {
+        Optimizer(unsigned long long tables_num, rows_num_map rows_num, unsigned long long attributes_num, \
+                  cardinalities_map& attributes_cardinality, std::unordered_map<unsigned long long, \
+                  std::set<char>>& attributes_in_predicates, \
+                  std::set<join>& joins) {
 
             this->cardinalities = std::move(attributes_cardinality);
 
             double cost;
+            std::string view;
             for (unsigned long long i = 1; i <= tables_num; ++i) {
                 cost = rows_num[i];
+                view = std::to_string(i);
                 if (attributes_in_predicates.find(i) != attributes_in_predicates.end()) {
-                    for (auto attribute : attributes_in_predicates[i])
+                    for (auto attribute : attributes_in_predicates[i]) {
+                        view += std::string(1, attribute);
                         rows_num[i] /= this->cardinalities[i][attribute];
+                    }
                     cost *= 2;
                 }
-                this->nodes.insert(std::make_pair(node_max_current_id++, new Node(rows_num[i], cost, std::to_string(i))));
+                this->nodes.insert(std::make_pair(node_max_current_id++, new Node(rows_num[i], cost, view)));
             }
             
             this->rows_num = std::move(rows_num);
@@ -32,103 +39,167 @@ class Optimizer {
         }
 
         std::pair<std::string, double> solve() {
-            std::set<join> preferable_cluster;
+            std::pair<unsigned long long, unsigned long long> preferable_node_ids;
             double min_rows_num;
             double rows;
             Node* left_subtree;
             Node* right_subtree;
             while (not clusters.empty()) {
+                min_rows_num = DBL_MAX;
                 for (auto& [left_node_id, cluster_map] : clusters) {
                     for (auto& [right_node_id, join_set] : cluster_map) {
-
+                        left_subtree = nodes[left_node_id];
+                        right_subtree = nodes[right_node_id];
+                        rows = left_subtree->rows * right_subtree->rows;
+                        for (auto& join : join_set) {
+                            rows /= std::max(cardinalities[join.first.first][join.second.first], \
+                                             cardinalities[join.first.second][join.second.second]);
+                        }
+                        if (rows < min_rows_num) {
+                            min_rows_num = rows;
+                            preferable_node_ids = std::make_pair(left_node_id, right_node_id);
+                        }
                     }
                 }
+                left_subtree = nodes[preferable_node_ids.first];
+                right_subtree = nodes[preferable_node_ids.second];
+                auto join_set = clusters[preferable_node_ids.first][preferable_node_ids.second];
+                clusters[preferable_node_ids.first].erase(preferable_node_ids.second);
+                if (clusters[preferable_node_ids.first].empty())
+                    clusters.erase(preferable_node_ids.first);
+                if (clusters.find(preferable_node_ids.first) != clusters.end()) {
+                    for (auto& [right_node_id, join_set] : clusters[preferable_node_ids.first])
+                        clusters[right_node_id][node_max_current_id].insert(join_set.begin(), join_set.end());
+                    clusters.erase(preferable_node_ids.first);
+                }
+                if (clusters.find(preferable_node_ids.second) != clusters.end()) {
+                    for (auto& [right_node_id, join_set] : clusters[preferable_node_ids.second])
+                        clusters[right_node_id][node_max_current_id].insert(join_set.begin(), join_set.end());
+                    clusters.erase(preferable_node_ids.second);
+                }
+                for (auto& [left_node_id, cluster_map] : clusters) {
+                    for (auto& [right_node_id, join_set] : cluster_map) {
+                        if (right_node_id == preferable_node_ids.first or right_node_id == preferable_node_ids.second) {
+                            cluster_map[node_max_current_id] = join_set;
+                            cluster_map.erase(right_node_id);
+                        }
+                    }
+                }
+                if (std::min(right_subtree->rows, left_subtree->rows) * \
+                   (std::max(right_subtree->rows, left_subtree->rows) - 3.4) - \
+                    std::max(right_subtree->rows, left_subtree->rows) * 1.5 < 0) { // then NestLoop is better
+                    if (right_subtree->rows > left_subtree->rows) {
+                        std::swap(left_subtree, right_subtree);
+                        std::set<join> new_join_set;
+                        for (auto join : join_set) {
+                            new_join_set.insert(std::make_pair(std::make_pair(join.first.second, join.first.first), \
+                                                               std::make_pair(join.second.second, join.second.first)));
+                        }
+                        join_set = std::move(new_join_set);
+                    }
+                    nodes[node_max_current_id++] = nestLoop_inner_join(left_subtree, right_subtree, join_set);
+                }
+                else { // otherwise, HashJoin is better
+                    if (right_subtree->rows < left_subtree->rows) {
+                        std::swap(left_subtree, right_subtree);
+                        std::set<join> new_join_set;
+                        for (auto join : join_set) {
+                            new_join_set.insert(std::make_pair(std::make_pair(join.first.second, join.first.first), \
+                                                               std::make_pair(join.second.second, join.second.first)));
+                        }
+                        join_set = std::move(new_join_set);
+                    }
+                    nodes[node_max_current_id++] = hash_inner_join(left_subtree, right_subtree, join_set);
+                }
+                nodes.erase(preferable_node_ids.first);
+                nodes.erase(preferable_node_ids.second);
+                
             }
-            // Проверить cross joins
-
-            std::pair<std::string, double> fake{" ", 10};
-            return fake;
+            while (this->nodes.size() != 1) {
+                min_rows_num = DBL_MAX;
+                for (auto& [left_node_id, left_node] : this->nodes) {
+                    for (auto& [right_node_id, right_node] : this->nodes) {
+                        if (left_node_id != right_node_id) {
+                            rows = left_node->rows * right_node->rows;
+                            if (rows < min_rows_num) {
+                                min_rows_num = rows;
+                                preferable_node_ids = std::make_pair(left_node_id, right_node_id);
+                            }
+                        }
+                    }
+                }
+                left_subtree = nodes[preferable_node_ids.first];
+                right_subtree = nodes[preferable_node_ids.second];
+                if (right_subtree->rows > left_subtree->rows)
+                    std::swap(left_subtree, right_subtree);
+                nodes[node_max_current_id++] = cross_join(left_subtree, right_subtree);
+                nodes.erase(preferable_node_ids.first);
+                nodes.erase(preferable_node_ids.second);
+            }
+            Node* result = this->nodes[node_max_current_id - 1];
+            return std::make_pair(result->view, result->cost);
         }
 
     private:
-        class Node {
-            private:
-                double rows;
-                double cost;
-                std::string view;
-                std::set<unsigned long long> tables;
-            public:
-                Node(double rows, double cost, std::string view) {
-                    this->rows = rows;
-                    this->cost = cost;
-                    this->view = std::move(view);
-                }
-
-                double get_rows() {
-                    return rows;
-                }
-
-                double get_cost() {
-                    return cost;
-                }
-
-                std::string get_view() {
-                    return view;
-                }
-        };
+        typedef struct Node {
+            double rows;
+            double cost;
+            std::string view;
+        } Node;
 
         cardinalities_map cardinalities;
         rows_num_map rows_num;
         std::unordered_map<unsigned long long, Node*> nodes;
         unsigned long long node_max_current_id = 1;
-        std::unordered_map<unsigned long long, std::unordered_map<unsigned long long, std::set<join>>> clusters; // left_node_id => (right_node_id => std::set<join>)
+        std::unordered_map<unsigned long long, std::unordered_map<unsigned long long, std::set<join>>> clusters;
+        // left_node_id => (right_node_id => std::set<join>)
 
-        Node* nestLoop_inner_join(Node* left_subtree, Node* right_subtree, unsigned long long join_clauses_num, \
-                                  std::pair<unsigned long long, unsigned long long>* table_nums, std::pair<char, char>* attribute_chars) {
-            double rows = left_subtree->get_rows() * right_subtree->get_rows();
-            for (int i = 0; i < join_clauses_num; ++i) {
-                rows /= std::max(cardinalities[table_nums[i].first][attribute_chars[i].first], \
-                                 cardinalities[table_nums[i].second][attribute_chars[i].second]);
-            }
-            double cost = left_subtree->get_cost() + right_subtree->get_cost() + \
-                          right_subtree->get_rows() * 1.1 + (left_subtree->get_rows() - 1) * right_subtree->get_rows() + rows * 0.1;
-            
+        Node* nestLoop_inner_join(Node* left_subtree, Node* right_subtree, std::set<join>& join_set) {
+            double rows = left_subtree->rows * right_subtree->rows;
             std::string clauses;
-            for (int i = 0; i < join_clauses_num; ++i)
-                clauses += std::string(" {") + std::to_string(table_nums[i].first) + std::string(".") + std::string(1, attribute_chars[i].first) + \
-                           std::string(" ") + std::to_string(table_nums[i].second) + std::string(".") + std::string(1, attribute_chars[i].second) + std::string("}");
-            std::string view = std::string("(") + left_subtree->get_view() + std::string(" ") + right_subtree->get_view() + clauses + std::string(")");
+            for (auto& join : join_set) {
+                rows /= std::max(cardinalities[join.first.first][join.second.first], \
+                                 cardinalities[join.first.second][join.second.second]);
+                clauses += std::string(" {") + std::to_string(join.first.first) + std::string(".") + std::string(1, join.second.first) + \
+                           std::string(" ") + std::to_string(join.first.second) + std::string(".") + std::string(1, join.second.second) + \
+                           std::string("}");
+            }
+            double cost = left_subtree->cost + right_subtree->cost + \
+                          right_subtree->rows * (left_subtree->rows + 0.1) + rows * 0.1;
+            
+            std::string view = std::string("(") + left_subtree->view + std::string(" ") + \
+                               right_subtree->view + clauses + std::string(")");
 
             Node* node = new Node(rows, cost, view);
             return node;
         }
 
-        Node* hash_inner_join(Node* left_subtree, Node* right_subtree, unsigned long long join_clauses_num, \
-                              std::pair<unsigned long long, unsigned long long>* table_nums, std::pair<char, char>* attribute_chars) {
-            double rows = left_subtree->get_rows() * right_subtree->get_rows();
-            for (int i = 0; i < join_clauses_num; ++i) {
-                rows /= std::max(cardinalities[table_nums[i].first][attribute_chars[i].first], \
-                                 cardinalities[table_nums[i].second][attribute_chars[i].second]);
-            }
-            double cost = right_subtree->get_cost() + right_subtree->get_rows() * 1.5 + \
-                          left_subtree->get_cost() + left_subtree->get_rows() * 3.5 + rows * 0.1;
-
+        Node* hash_inner_join(Node* left_subtree, Node* right_subtree, std::set<join>& join_set) {
+            double rows = left_subtree->rows * right_subtree->rows;
             std::string clauses;
-            for (int i = 0; i < join_clauses_num; ++i)
-                clauses += std::string(" {") + std::to_string(table_nums[i].first) + std::string(".") + std::string(1, attribute_chars[i].first) + \
-                           std::string(" ") + std::to_string(table_nums[i].second) + std::string(".") + std::string(1, attribute_chars[i].second) + std::string("}");
-            std::string view = std::string("(") + left_subtree->get_view() + std::string(" ") + right_subtree->get_view() + clauses + std::string(")");
+            for (auto& join : join_set) {
+                rows /= std::max(cardinalities[join.first.first][join.second.first], \
+                                 cardinalities[join.first.second][join.second.second]);
+                clauses += std::string(" {") + std::to_string(join.first.first) + std::string(".") + std::string(1, join.second.first) + \
+                           std::string(" ") + std::to_string(join.first.second) + std::string(".") + std::string(1, join.second.second) + \
+                           std::string("}");
+            }
+            double cost = right_subtree->cost + right_subtree->rows * 1.5 + \
+                          left_subtree->cost + left_subtree->rows * 3.5 + rows * 0.1;
+
+            std::string view = std::string("(") + left_subtree->view + std::string(" ") + \
+                               right_subtree->view + clauses + std::string(")");
 
             Node* node = new Node(rows, cost, view);
             return node;
         }
 
         Node* cross_join(Node* left_subtree, Node* right_subtree) {
-            double rows = left_subtree->get_rows() * right_subtree->get_rows();
-            double cost = left_subtree->get_cost() + right_subtree->get_cost() + right_subtree->get_rows() * 0.2 + \
-                          (left_subtree->get_rows() - 1) * right_subtree->get_rows() * 0.1;
+            double rows = left_subtree->rows * right_subtree->rows;
+            double cost = left_subtree->cost + right_subtree->cost + right_subtree->rows * 0.2 + \
+                          (left_subtree->rows - 1) * right_subtree->rows * 0.1;
 
-            std::string view = std::string("(") + left_subtree->get_view() + std::string(" ") + right_subtree->get_view() + std::string(")");
+            std::string view = std::string("(") + left_subtree->view + std::string(" ") + right_subtree->view + std::string(")");
 
             Node* node = new Node(rows, cost, view);
             return node;
